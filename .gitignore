@@ -1,0 +1,97 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+.next/
+coverage/
+
+# Environment files (SECRETS — NEVER COMMIT)
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env
+*.key
+*.pem
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+debug_output.txt
+
+# Large backend assets
+backend/images/
+backend/books/
+backend/qdrant_db/
+backend/*.pdf
+backend/bece_*.json
+backend/nabteb_*.json
+backend/waec/
+backend/neco/
+backend/jamb/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Temp files
+*.tmp
+*.temp
+/tmp/
+.cache/
+
+# IDE specific
+*.swp
+*.swo
+.vscode/*
+!.vscode/extensions.json
+.idea/*
+
+# Test outputs
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# Nobus
+.nobus/
+*.nobus/
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/*
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,1158 @@
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { useAuth } from '../context/AuthContext'
+import { supabase } from '../lib/supabase'
+import { Dices, Circle, Check, X, FileText, TriangleAlert, Trophy, BarChart3, Flame, Settings, Book, Rocket, Flag, Brain, RefreshCw, Clock, ClipboardList, ArrowLeft } from 'lucide-react'
+import {
+  fetchCBTQuestions, createCBTSession, completeCBTSession,
+  getCBTHistory, getAvailableTopics, getAvailableYears,
+  getQuestionBankStats,
+} from '../lib/cbt'
+import { explainCBTAnswer, generateCBTReport, getUserProfile } from '../services/api'
+import { ExplanationBody } from '../utils/RenderMath'
+import { recordCBTResult, updateStreak } from '../lib/stats'
+import XPToast from '../components/XPToast'
+import { createNotification } from '../lib/notifications'
+
+const EXAM_TYPES = ['JAMB', 'WAEC', 'NECO', 'BECE', 'NABTEB']
+
+// NABTEB is theory-only — no objective questions
+const THEORY_ONLY_EXAMS = ['NABTEB']
+
+const EXAM_INFO = {
+  JAMB:   { label: 'Joint Admissions & Matriculation Board', level: 'University Entry' },
+  WAEC:   { label: 'West African Examinations Council',      level: 'Senior Secondary' },
+  NECO:   { label: 'National Examinations Council',          level: 'Senior Secondary' },
+  BECE:   { label: 'Basic Education Certificate Exam',       level: 'JSS 3'            },
+  NABTEB: { label: 'National Business & Technical Exams',    level: 'Vocational / SSS' },
+}
+
+const DURATIONS = [5, 10, 15, 20, 25, 30, 45, 60]
+const COUNTS = [5, 10, 15, 20, 25, 30, 35, 40, 50, 60]
+const DIFFICULTIES = [
+  { value: 'mixed', label: 'Mixed', Icon: Dices, iconColor: 'text-[var(--color-muted)]' },
+  { value: 'easy', label: 'Easy', Icon: Circle, iconColor: 'text-green-500 fill-green-500' },
+  { value: 'medium', label: 'Medium', Icon: Circle, iconColor: 'text-yellow-500 fill-yellow-500' },
+  { value: 'hard', label: 'Hard', Icon: Circle, iconColor: 'text-red-500 fill-red-500' },
+]
+
+const GRADE_CONFIG = {
+  A: { color: 'text-green-600', bg: 'bg-green-500', label: 'Excellent!' },
+  B: { color: 'text-blue-600', bg: 'bg-blue-500', label: 'Very Good!' },
+  C: { color: 'text-yellow-600', bg: 'bg-yellow-500', label: 'Good' },
+  D: { color: 'text-orange-500', bg: 'bg-orange-400', label: 'Pass' },
+  F: { color: 'text-red-500', bg: 'bg-red-500', label: 'Fail' },
+}
+
+function getGrade(pct) {
+  if (pct >= 70) return 'A'
+  if (pct >= 60) return 'B'
+  if (pct >= 50) return 'C'
+  if (pct >= 45) return 'D'
+  return 'F'
+}
+
+function formatTime(secs) {
+  const m = Math.floor(secs / 60)
+  const s = secs % 60
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+function formatTakenAt(timestamp) {
+  if (!timestamp) return ''
+  const date = new Date(timestamp)
+  return date.toLocaleDateString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  }) + ' · ' + date.toLocaleTimeString('en-US', {
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  })
+}
+
+const CBT_STORAGE_KEYS = {
+  SETUP: 'mathgenius_cbt_setup',
+  REPORT: 'mathgenius_cbt_report',
+  SCREEN: 'mathgenius_cbt_screen',
+}
+
+function loadStoredJSON(key) {
+  if (typeof window === 'undefined') return null
+  try {
+    return JSON.parse(window.localStorage.getItem(key))
+  } catch {
+    return null
+  }
+}
+
+function saveStoredJSON(key, value) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(key, JSON.stringify(value))
+}
+
+function removeStored(key) {
+  if (typeof window === 'undefined') return
+  window.localStorage.removeItem(key)
+}
+
+function OptionBtn({ letter, text, selected, correct, revealed, onClick }) {
+  let style = 'border-[var(--color-border)] bg-white hover:border-[var(--color-teal)] hover:bg-[#e8f4f4]'
+  if (revealed) {
+    if (letter === correct) style = 'border-green-500 bg-green-50 text-green-800'
+    else if (letter === selected && letter !== correct) style = 'border-red-400 bg-red-50 text-red-700'
+    else style = 'border-[var(--color-border)] bg-white opacity-60'
+  } else if (selected === letter) {
+    style = 'border-[var(--color-teal)] bg-[#e8f4f4] text-[var(--color-teal)]'
+  }
+  return (
+    <button
+      onClick={() => !revealed && onClick(letter)}
+      disabled={revealed}
+      className={`w-full text-left flex items-start gap-3 px-4 py-3
+                  rounded-xl border-2 transition-all duration-150 ${style}`}
+    >
+      <span className="shrink-0 w-7 h-7 rounded-full border-2 border-current
+                       flex items-center justify-center text-xs font-bold mt-0.5">
+        {letter}
+      </span>
+      <span className="text-sm leading-snug flex-1">{text}</span>
+      {revealed && letter === correct && <Check size={20} className="shrink-0 text-green-600" />}
+      {revealed && letter === selected && letter !== correct && <X size={20} className="shrink-0 text-red-500" />}
+    </button>
+  )
+}
+
+function SubmitModal({ answered, total, onConfirm, onCancel }) {
+  const unanswered = total - answered
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center
+                    bg-black/50 backdrop-blur-sm px-4">
+      <div className="bg-white rounded-2xl border-2 border-[var(--color-ink)]
+                      shadow-2xl p-8 max-w-sm w-full text-center">
+        <FileText size={48} className="mx-auto mb-4 text-[var(--color-ink)]" />
+        <h3 className="font-serif font-black text-2xl text-[var(--color-ink)] mb-2">
+          Submit Exam?
+        </h3>
+        <p className="text-[var(--color-muted)] text-sm mb-2">
+          You have answered{' '}
+          <span className="font-bold text-[var(--color-ink)]">{answered}</span>
+          {' '}of{' '}
+          <span className="font-bold">{total}</span> questions.
+        </p>
+        {unanswered > 0 ? (
+          <p className="text-orange-500 text-sm font-semibold mb-6">
+            <TriangleAlert size={16} className="inline-block mr-1" /> {unanswered} question{unanswered !== 1 ? 's' : ''} still unanswered
+          </p>
+        ) : (
+          <p className="text-green-600 text-sm font-semibold mb-6 flex items-center gap-1">
+            <Check size={16} /> All questions answered!
+          </p>
+        )}
+        <div className="flex gap-3">
+          <button onClick={onCancel} className="flex-1 btn-secondary py-3 text-sm">
+            <ArrowLeft size={16} className="inline-block mr-1" /> Go Back
+          </button>
+          <button onClick={onConfirm} className="flex-1 btn-primary py-3 text-sm justify-center">
+            Submit Now
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default function CBT() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const savedSetup = loadStoredJSON(CBT_STORAGE_KEYS.SETUP)
+  const savedReport = loadStoredJSON(CBT_STORAGE_KEYS.REPORT)
+  const savedScreen = typeof window !== 'undefined'
+    ? window.localStorage.getItem(CBT_STORAGE_KEYS.SCREEN)
+    : null
+
+  const [screen, setScreen] = useState(() => {
+    if (savedScreen === 'report' && savedReport) return 'report'
+    return 'setup'
+  })
+
+  // Config
+  const [examType, setExamType] = useState(savedSetup?.examType || 'JAMB')
+  const [topics, setTopics] = useState(savedSetup?.topics || [])
+  const [difficulty, setDifficulty] = useState(savedSetup?.difficulty || 'mixed')
+  const [duration, setDuration] = useState(savedSetup?.duration || 30)
+  const [count, setCount] = useState(savedSetup?.count || 20)
+  const [year, setYear] = useState(savedSetup?.year || '')
+
+  const topic = topics.length === 1
+    ? topics[0]
+    : topics.length > 1 ? topics.join(', ') : ''
+
+  // Available options
+  const [availTopics, setAvailTopics] = useState([])
+  const [availYears, setAvailYears] = useState([])
+  const [bankStats, setBankStats] = useState({})
+  const [history, setHistory] = useState([])
+  const [loadingSetup, setLoadingSetup] = useState(false)
+  const [setupError, setSetupError] = useState('')
+
+  // Persist setup config across reloads
+  useEffect(() => {
+    saveStoredJSON(CBT_STORAGE_KEYS.SETUP, {
+      examType, topics, difficulty, duration, count, year,
+    })
+  }, [examType, topics, difficulty, duration, count, year])
+
+  // Persist report state across reloads
+  const [report, setReport] = useState(savedReport)
+  useEffect(() => {
+    if (report) {
+      saveStoredJSON(CBT_STORAGE_KEYS.REPORT, report)
+      window.localStorage.setItem(CBT_STORAGE_KEYS.SCREEN, 'report')
+    } else {
+      removeStored(CBT_STORAGE_KEYS.REPORT)
+      removeStored(CBT_STORAGE_KEYS.SCREEN)
+    }
+  }, [report])
+
+  // Exam state
+  const [questions, setQuestions] = useState([])
+  const [currentIdx, setCurrentIdx] = useState(0)
+  const [answers, setAnswers] = useState({})
+  const [flagged, setFlagged] = useState({})
+  const [timeLeft, setTimeLeft] = useState(0)
+  const [sessionId, setSessionId] = useState(null)
+  const [startTime, setStartTime] = useState(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [showSubmitModal, setShowSubmitModal] = useState(false)
+  const timerRef = useRef(null)
+
+  // Report state
+  const [expandedQ, setExpandedQ] = useState(null)
+  const [explanations, setExplanations] = useState({})
+  const [loadingExpl, setLoadingExpl] = useState({})
+  const [aiSummary, setAiSummary] = useState('')
+  const [toast, setToast] = useState(null)
+
+  // Derived — is selected exam theory-only?
+  const isTheoryOnly = THEORY_ONLY_EXAMS.includes(examType)
+
+  useEffect(() => { if (user) { loadSetupData(); loadHistory(); loadPreferredTopics() } }, [user])
+  useEffect(() => { if (examType) loadTopicsAndYears() }, [examType])
+
+  // ── Restore in-progress CBT session on mount ─────────────────────
+  useEffect(() => {
+    if (!user) return
+    supabase
+      .from('cbt_sessions')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('status', 'ongoing')
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .single()
+      .then(({ data }) => {
+        if (!data) return
+        const elapsed = Math.round((Date.now() - new Date(data.started_at).getTime()) / 1000)
+        const remaining = (data.duration_mins * 60) - elapsed
+        if (remaining <= 0) return  // session timed out while away — don't restore
+
+        // Restore questions from the saved snapshot
+        if (data.questions_snapshot) {
+          setQuestions(data.questions_snapshot)
+          setAnswers(data.answers_so_far || {})
+          setFlagged(data.flagged_so_far || {})
+          setCurrentIdx(data.current_idx || 0)
+          setTimeLeft(remaining)
+          setSessionId(data.id)
+          setStartTime(Date.now() - elapsed * 1000)
+          setExamType(data.exam_type || 'JAMB')
+          setScreen('exam')
+        }
+      })
+  }, [user?.id])
+
+  const loadSetupData = async () => {
+    const stats = await getQuestionBankStats()
+    setBankStats(stats)
+  }
+
+  const loadPreferredTopics = async () => {
+    try {
+      const res = await getUserProfile(user.id)
+      const prof = res?.data?.profile
+      if (prof?.preferred_topics?.length) {
+        setTopics(prof.preferred_topics)
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  const loadTopicsAndYears = async () => {
+    const [t, y] = await Promise.all([
+      getAvailableTopics(examType),
+      getAvailableYears(examType),
+    ])
+    setAvailTopics(t)
+    setAvailYears(y)
+  }
+
+  const loadHistory = async () => {
+    const { data } = await getCBTHistory(user.id)
+    setHistory(data || [])
+  }
+
+  const toggleTopic = (t) =>
+    setTopics(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])
+
+  const parseTopicsFromHistory = (topicString) => {
+    if (!topicString) return []
+    return topicString.split(',').map(t => t.trim()).filter(Boolean)
+  }
+
+  const buildTopicLabel = (topicsList) => {
+    if (!topicsList || topicsList.length === 0) return ''
+    return topicsList.join(', ')
+  }
+
+  const prepareExam = async ({ examType: targetExam, topics: targetTopics, difficulty: targetDifficulty, year: targetYear, count: targetCount, duration: targetDuration }) => {
+    if (THEORY_ONLY_EXAMS.includes(targetExam)) {
+      navigate('/theory')
+      return
+    }
+
+    setReport(null)
+    setLoadingSetup(true)
+    setSetupError('')
+
+    const { data: qs } = await fetchCBTQuestions({
+      examType: targetExam === 'Mixed' ? null : targetExam,
+      topics: targetTopics && targetTopics.length > 0 ? targetTopics : null,
+      difficulty: targetDifficulty,
+      year: targetYear ? parseInt(targetYear) : null,
+      count: targetCount,
+    })
+
+    if (!qs || qs.length === 0) {
+      setSetupError('No questions found for this exam configuration. Try a different history item or adjust filters.')
+      setLoadingSetup(false)
+      return
+    }
+    setSetupError('')
+
+    setExamType(targetExam)
+    setTopics(targetTopics || [])
+    setDifficulty(targetDifficulty)
+    setYear(targetYear || '')
+    setDuration(targetDuration)
+    setCount(targetCount)
+
+    const topicLabel = buildTopicLabel(targetTopics)
+    const { data: session } = await createCBTSession(user.id, {
+      examType: targetExam,
+      topic: topicLabel || null,
+      difficulty: targetDifficulty,
+      year: targetYear ? parseInt(targetYear) : null,
+      duration: targetDuration,
+      count: qs.length,
+      questions_snapshot: qs,
+      answers_so_far: {},
+      flagged_so_far: {},
+      current_idx: 0,
+    })
+
+    setQuestions(qs)
+    setSessionId(session?.id)
+    setCurrentIdx(0)
+    setAnswers({})
+    setFlagged({})
+    setTimeLeft(targetDuration * 60)
+    setStartTime(Date.now())
+    setScreen('exam')
+    setLoadingSetup(false)
+  }
+
+  const startExam = async () => {
+    await prepareExam({
+      examType,
+      topics,
+      difficulty,
+      year,
+      count,
+      duration,
+    })
+  }
+
+  const retakeExam = async (historyItem) => {
+    const targetTopics = parseTopicsFromHistory(historyItem.topic)
+    await prepareExam({
+      examType: historyItem.exam_type,
+      topics: targetTopics,
+      difficulty: historyItem.difficulty,
+      year: historyItem.year,
+      count: historyItem.total_questions,
+      duration: historyItem.duration_mins || duration,
+    })
+  }
+
+  // ── Auto-save answers + progress whenever they change ────────────
+  useEffect(() => {
+    if (screen !== 'exam' || !sessionId) return
+    supabase.from('cbt_sessions').update({
+      answers_so_far: answers,
+      flagged_so_far: flagged,
+      current_idx:    currentIdx,
+    }).eq('id', sessionId).then(() => {})
+  }, [answers, flagged, currentIdx])
+
+  useEffect(() => {
+    if (screen !== 'exam') return
+    timerRef.current = setInterval(() => {
+      setTimeLeft(t => {
+        if (t <= 1) { clearInterval(timerRef.current); handleSubmit(true); return 0 }
+        return t - 1
+      })
+    }, 1000)
+    return () => clearInterval(timerRef.current)
+  }, [screen])
+
+  const handleSubmit = useCallback(async (autoSubmit = false) => {
+    if (submitting) return
+    clearInterval(timerRef.current)
+    setSubmitting(true)
+    setShowSubmitModal(false)
+
+    const timeTaken = Math.round((Date.now() - startTime) / 1000)
+
+    const answerRows = questions.map(q => ({
+      question_id: q.id,
+      question_text: q.question_text,
+      option_a: q.option_a,
+      option_b: q.option_b,
+      option_c: q.option_c,
+      option_d: q.option_d,
+      option_e: q.option_e || null,
+      correct_answer: q.correct_answer,
+      student_answer: answers[q.id] || null,
+      is_correct: answers[q.id] === q.correct_answer,
+      topic: q.topic,
+    }))
+
+    const { score, percentage } = await completeCBTSession(sessionId, answerRows, timeTaken)
+
+    const nextReport = {
+      answers: answerRows, score, percentage,
+      total: questions.length, timeTaken,
+      autoSubmit, examType, topic, difficulty,
+      year, duration, count, topics,
+    }
+
+    // ── Show report screen immediately ────────────────────────────────
+    setReport(nextReport)
+    setScreen('report')
+    setSubmitting(false)
+
+    // ── Fire ALL background work in parallel so nothing blocks anything ──
+    // AI summary runs at the same time as stats/streak/notifications
+    generateCBTReport(answerRows, score, questions.length, timeTaken, examType, topic)
+      .then(res => setAiSummary(res.data.summary))
+      .catch(() => setAiSummary(''))
+
+    // Stats + streak + notifications (non-critical, fully background)
+    ;(async () => {
+      try {
+        const [statResult, streakResult] = await Promise.all([
+          recordCBTResult(user.id, {
+            score, total: questions.length,
+            timeTaken, answers: answerRows, examType,
+          }),
+          updateStreak(user.id),
+        ])
+        const allNewBadges = [
+          ...(statResult?.newBadges || []),
+          ...(streakResult?.newBadges || []),
+        ]
+        setToast({ xpGained: statResult?.xpGained || 0, newBadges: allNewBadges })
+
+        await createNotification(user.id, {
+          type: 'cbt_complete',
+          title: `CBT Result: ${percentage}% (${getGrade(percentage)})`,
+          message: `${examType} · ${score}/${questions.length} correct · ${Math.round(timeTaken / 60)}m`,
+          icon: percentage >= 70 ? 'trophy' : percentage >= 50 ? 'bar_chart' : 'file_text',
+          link: '/cbt-history',
+        })
+
+        if (streakResult?.streakIncreased && streakResult.newStreak > 1) {
+          await createNotification(user.id, {
+            type: 'streak',
+            title: `${streakResult.newStreak}-day streak!`,
+            message: 'Keep it up, study again tomorrow to extend your streak.',
+            icon: 'flame',
+            link: '/mastery',
+          })
+        }
+      } catch { /* non-critical */ }
+
+      loadHistory()
+    })()
+  }, [questions, answers, sessionId, startTime, submitting, examType, topic, difficulty])
+
+  const fetchExplanation = async (answer) => {
+    const id = answer.question_id
+    if (explanations[id] || loadingExpl[id]) return
+    setLoadingExpl(prev => ({ ...prev, [id]: true }))
+    try {
+      const res = await explainCBTAnswer({
+        question_text: answer.question_text,
+        option_a: answer.option_a,
+        option_b: answer.option_b,
+        option_c: answer.option_c,
+        option_d: answer.option_d,
+        option_e: answer.option_e || null,
+        correct_answer: answer.correct_answer,
+        student_answer: answer.student_answer,
+        topic: answer.topic,
+      })
+      setExplanations(prev => ({ ...prev, [id]: res.data.explanation }))
+    } catch {
+      setExplanations(prev => ({ ...prev, [id]: 'Could not load explanation.' }))
+    }
+    setLoadingExpl(prev => ({ ...prev, [id]: false }))
+  }
+
+  const currentQ = questions[currentIdx]
+  const answered = Object.keys(answers).length
+  const unanswered = questions.length - answered
+  const timerUrgent = timeLeft <= 60
+
+  // ── SETUP ────────────────────────────────────────────────
+  if (screen === 'setup') {
+    return (
+      <div className="max-w-5xl mx-auto px-6 py-10">
+        <div className="mb-8">
+          <p className="font-mono text-xs tracking-widest uppercase
+                        text-[var(--color-gold)] mb-2 flex items-center gap-3">
+            <span className="block w-6 h-px bg-[var(--color-gold)]" />
+            CBT Mode
+          </p>
+          <h1 className="font-serif font-black text-5xl tracking-tight">
+            Computer Based Test
+          </h1>
+          <p className="text-[var(--color-muted)] mt-2 text-lg">
+            Timed exam simulation with real WAEC, NECO, JAMB and BECE questions.
+          </p>
+        </div>
+
+        {Object.keys(bankStats).length > 0 && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
+            {Object.entries(bankStats).map(([type, stat]) => (
+              <div key={type} className="card bg-white p-4 text-center">
+                <div className="font-serif font-black text-2xl text-[var(--color-teal)]">
+                  {stat.total}
+                </div>
+                <div className="font-bold text-sm text-[var(--color-ink)]">{type}</div>
+                <div className="text-xs text-[var(--color-muted)] mt-0.5">
+                  {stat.years} year{stat.years !== 1 ? 's' : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {setupError && (
+          <div className="card bg-red-50 border border-red-200 rounded-2xl p-4 mb-6 text-sm text-red-700">
+            {setupError}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6 items-stretch">
+          <div className="card overflow-hidden">
+            <div className="bg-[var(--color-teal)] px-6 py-4">
+              <p className="font-serif font-bold text-white text-lg">
+                <Settings size={20} className="inline-block mr-2" /> Configure Your Exam
+              </p>
+            </div>
+            <div className="bg-white p-6 space-y-5">
+
+              {/* Exam type */}
+              <div>
+                <label className="font-mono text-[10px] uppercase tracking-widest
+                                   text-[var(--color-muted)] block mb-2">
+                  Exam Type
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {EXAM_TYPES.map(et => (
+                    <button key={et}
+                      onClick={() => { setExamType(et); setTopics([]); setYear('') }}
+                      className={`px-5 py-2.5 rounded-xl text-sm font-semibold border-2 transition-all
+                        ${examType === et
+                          ? 'border-[var(--color-teal)] bg-[#e8f4f4] text-[var(--color-teal)]'
+                          : 'border-[var(--color-border)] text-[var(--color-muted)]'}`}>
+                      {et}
+                    </button>
+                  ))}
+                </div>
+                {/* Exam description */}
+                {EXAM_INFO[examType] && (
+                  <p className="text-xs text-[var(--color-muted)] mt-2">
+                    {EXAM_INFO[examType].label} · {EXAM_INFO[examType].level}
+                  </p>
+                )}
+              </div>
+
+              {/* NABTEB theory-only notice */}
+              {isTheoryOnly ? (
+                <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-5">
+                  <p className="font-semibold text-amber-800 text-sm mb-1">
+                    <Book size={18} className="inline-block mr-1" /> NABTEB is Theory Only
+                  </p>
+                  <p className="text-amber-700 text-xs leading-relaxed">
+                    NABTEB past questions are essay/theory format, there are no
+                    multiple-choice CBT questions for this exam type.
+                  </p>
+                  <a href="/theory"
+                    className="inline-block mt-3 px-4 py-2 rounded-xl bg-amber-600
+                               text-white text-xs font-semibold hover:bg-amber-700
+                               transition-colors">
+                    Go to Theory Practice →
+                  </a>
+                </div>
+              ) : (
+                <>
+                  {/* Topic multi-select */}
+                  <div>
+                    <label className="font-mono text-[10px] uppercase tracking-widest
+                                       text-[var(--color-muted)] block mb-2">
+                      Topics: select one or more (blank = all topics)
+                    </label>
+                    {availTopics.length === 0 ? (
+                      <p className="text-xs text-[var(--color-muted)] italic">
+                        Upload questions first to see available topics
+                      </p>
+                    ) : (
+                      <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto
+                                      border-2 border-[var(--color-border)] rounded-xl p-3">
+                        {availTopics.map(t => (
+                          <button key={t} type="button" onClick={() => toggleTopic(t)}
+                            className={`px-3 py-1.5 rounded-xl text-xs font-semibold border-2 transition-all
+                              ${topics.includes(t)
+                                ? 'border-[var(--color-teal)] bg-[#e8f4f4] text-[var(--color-teal)]'
+                                : 'border-[var(--color-border)] text-[var(--color-muted)] hover:border-[var(--color-ink)]'}`}>
+                            {topics.includes(t) ? <Check size={14} className="inline-block mr-1" /> : ''}{t}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {topics.length > 0 && (
+                      <div className="flex items-center justify-between mt-2">
+                        <span className="text-xs text-[var(--color-teal)] font-medium">
+                          {topics.length} topic{topics.length !== 1 ? 's' : ''} selected
+                        </span>
+                        <button onClick={() => setTopics([])}
+                          className="text-xs text-[var(--color-muted)] hover:text-red-500 transition-colors">
+                          Clear all
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Year */}
+                  <div>
+                    <label className="font-mono text-[10px] uppercase tracking-widest
+                                       text-[var(--color-muted)] block mb-2">
+                      Year (Optional)
+                    </label>
+                    <select value={year} onChange={e => setYear(e.target.value)}
+                      className="w-full bg-[var(--color-paper)] border-2 border-[var(--color-border)]
+                                 focus:border-[var(--color-teal)] rounded-xl px-4 py-3 text-sm transition-colors">
+                      <option value="">Any Year</option>
+                      {availYears.map(y => <option key={y} value={y}>{y}</option>)}
+                    </select>
+                  </div>
+
+                  {/* Difficulty */}
+                  <div>
+                    <label className="font-mono text-[10px] uppercase tracking-widest
+                                       text-[var(--color-muted)] block mb-2">
+                      Difficulty
+                    </label>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {DIFFICULTIES.map(d => (
+                        <button key={d.value} onClick={() => setDifficulty(d.value)}
+                          className={`py-2.5 rounded-xl text-xs font-semibold border-2 transition-all text-center
+                            ${difficulty === d.value
+                              ? 'border-[var(--color-teal)] bg-[#e8f4f4] text-[var(--color-teal)]'
+                              : 'border-[var(--color-border)] text-[var(--color-muted)]'}`}>
+                          <d.Icon size={16} className={`inline-block mr-1 ${d.iconColor}`} /> {d.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Duration + Count */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="font-mono text-[10px] uppercase tracking-widest
+                                         text-[var(--color-muted)] block mb-2">
+                        Duration (mins)
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        {DURATIONS.map(d => (
+                          <button key={d} onClick={() => setDuration(d)}
+                            className={`px-3 py-2 rounded-xl text-xs font-semibold border-2 transition-all
+                              ${duration === d
+                                ? 'border-[var(--color-teal)] bg-[#e8f4f4] text-[var(--color-teal)]'
+                                : 'border-[var(--color-border)] text-[var(--color-muted)]'}`}>
+                            {d}m
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <label className="font-mono text-[10px] uppercase tracking-widest
+                                         text-[var(--color-muted)] block mb-2">
+                        No. of Questions
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        {COUNTS.map(c => (
+                          <button key={c} onClick={() => setCount(c)}
+                            className={`px-3 py-2 rounded-xl text-xs font-semibold border-2 transition-all
+                              ${count === c
+                                ? 'border-[var(--color-teal)] bg-[#e8f4f4] text-[var(--color-teal)]'
+                                : 'border-[var(--color-border)] text-[var(--color-muted)]'}`}>
+                            {c}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <button onClick={startExam} disabled={loadingSetup}
+                    className="w-full btn-primary py-4 text-base justify-center
+                               flex items-center gap-2 disabled:opacity-50">
+                    {loadingSetup ? (
+                      <>
+                        <span className="w-4 h-4 border-2 border-white/30
+                                         border-t-white rounded-full animate-spin" />
+                        Preparing questions...
+                      </>
+                    ) : <><Rocket size={20} /> Start {count}-Question {examType} Exam</>}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* History */}
+          <div className="card overflow-hidden flex flex-col h-full">
+            <div className="bg-[var(--color-ink)] px-5 py-4 flex items-center justify-between gap-3">
+              <p className="font-serif font-bold text-white flex items-center gap-2"><BarChart3 size={20} /> Recent Exams</p>
+              <button type="button" onClick={() => navigate('/cbt-history')}
+                className="btn-secondary py-2 px-3 text-xs">
+                View full history
+              </button>
+            </div>
+            <div className="bg-white divide-y divide-[var(--color-border)] flex-1 overflow-y-auto min-h-[320px]">
+              {history.length === 0 ? (
+                <div className="p-8 text-center">
+                  <p className="text-[var(--color-muted)] text-sm">No exams taken yet</p>
+                </div>
+              ) : history.map(h => {
+                const grade = getGrade(h.percentage)
+                const cfg = GRADE_CONFIG[grade]
+                return (
+                  <div key={h.id} className="px-5 py-3 flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-[var(--color-ink)] truncate">
+                        {h.exam_type} {h.year || ''}
+                        {h.topic ? ` · ${h.topic.slice(0, 20)}` : ''}
+                      </p>
+                      <p className="text-xs text-[var(--color-muted)] mt-0.5">
+                        {h.total_questions}Q · {h.difficulty}
+                      </p>
+                      <p className="text-[11px] text-[var(--color-muted)] mt-1">
+                        {formatTakenAt(h.completed_at)}
+                      </p>
+                    </div>
+                    <div className="text-right shrink-0 flex flex-col items-end gap-2">
+                      <div className={`font-serif font-black text-xl ${cfg.color}`}>
+                        {h.percentage}%
+                      </div>
+                      <div className="flex gap-2">
+                        <button type="button" onClick={() => navigate('/cbt-history', { state: { sessionId: h.id } })}
+                          className="rounded-full border border-[var(--color-teal)] bg-[var(--color-teal)]/10 text-[11px] font-semibold text-[var(--color-teal)] px-3 py-1 hover:bg-[var(--color-teal)]/20 transition">
+                          Review
+                        </button>
+                        <button type="button" onClick={() => retakeExam(h)}
+                          className="rounded-full border border-[var(--color-border)] bg-[var(--color-paper)] text-[11px] font-semibold text-[var(--color-ink)] px-3 py-1 hover:border-[var(--color-teal)] hover:text-[var(--color-teal)] transition">
+                          Retake
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── EXAM ─────────────────────────────────────────────────
+  if (screen === 'exam' && currentQ) {
+    const qId = currentQ.id
+    const userAnswer = answers[qId]
+    const isFlagged = flagged[qId]
+
+    return (
+      <div className="max-w-4xl mx-auto px-4 py-6">
+
+        {showSubmitModal && (
+          <SubmitModal
+            answered={answered}
+            total={questions.length}
+            onConfirm={() => handleSubmit(false)}
+            onCancel={() => setShowSubmitModal(false)}
+          />
+        )}
+
+        {/* Top bar */}
+        <div className={`sticky top-16 z-30 mb-5 rounded-2xl border-2
+                         flex items-center justify-between px-5 py-3 transition-colors
+          ${timerUrgent ? 'bg-red-50 border-red-400' : 'bg-white border-[var(--color-ink)]'}`}>
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="font-mono text-sm text-[var(--color-muted)] shrink-0">
+              Q {currentIdx + 1}/{questions.length}
+            </span>
+            <span className="text-xs px-2 py-1 bg-[var(--color-cream)]
+                             border border-[var(--color-border)] rounded-lg
+                             text-[var(--color-muted)] font-mono shrink-0">
+              {answered} done · {unanswered} left
+            </span>
+            {topic && (
+              <span className="hidden sm:block text-xs text-[var(--color-teal)]
+                               font-medium truncate max-w-[120px]">
+                {topic}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            <div className={`font-mono font-black text-xl tabular-nums
+              ${timerUrgent ? 'text-red-500 animate-pulse' : 'text-[var(--color-ink)]'}`}>
+              <Clock size={22} className="inline-block mr-1" /> {formatTime(timeLeft)}
+            </div>
+            <button
+              onClick={() => setShowSubmitModal(true)}
+              disabled={submitting}
+              className="btn-primary px-4 py-2 text-sm disabled:opacity-50">
+              {submitting ? <Clock size={20} className="animate-spin" /> : 'Submit'}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_200px] gap-5">
+          <div className="space-y-4">
+            <div className="card bg-white overflow-hidden">
+              <div className="bg-[var(--color-ink)] px-5 py-3 flex items-center justify-between">
+                <span className="font-serif font-bold text-white">
+                  Question {currentIdx + 1}
+                </span>
+                <div className="flex items-center gap-2">
+                  {currentQ.year && (
+                    <span className="text-white/60 text-xs font-mono">
+                      {examType} {currentQ.year}
+                    </span>
+                  )}
+                  <button
+                    onClick={() => setFlagged(f => ({ ...f, [qId]: !f[qId] }))}
+                    className={`text-lg transition-all
+                      ${isFlagged ? 'opacity-100' : 'opacity-40 hover:opacity-80'}`}
+                    title="Flag for review">
+                    <Flag size={20} />
+                  </button>
+                </div>
+              </div>
+              <div className="p-5">
+                {currentQ.topic && (
+                  <p className="font-mono text-[10px] uppercase tracking-widest
+                                 text-[var(--color-teal)] mb-3">
+                    {currentQ.topic}
+                  </p>
+                )}
+                <p className="text-[var(--color-ink)] text-base leading-relaxed font-medium mb-5">
+                  {currentQ.question_text}
+                </p>
+
+                {currentQ.image_url && (
+                  <div className="mb-5 flex justify-center">
+                    <img
+                      src={currentQ.image_url}
+                      alt="Question diagram"
+                      className="max-w-full max-h-64 rounded-xl border-2
+                                 border-[var(--color-border)] object-contain"
+                      onError={e => e.target.style.display = 'none'}
+                    />
+                  </div>
+                )}
+
+                <div className="space-y-2.5">
+                  {['A', 'B', 'C', 'D', ...(currentQ.option_e ? ['E'] : [])].map(letter => (
+                    <OptionBtn key={letter} letter={letter}
+                      text={currentQ[`option_${letter.toLowerCase()}`]}
+                      selected={userAnswer} correct={null} revealed={false}
+                      onClick={(l) => setAnswers(a => ({ ...a, [qId]: l }))}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              <button onClick={() => setCurrentIdx(i => Math.max(0, i - 1))}
+                disabled={currentIdx === 0}
+                className="btn-secondary px-5 py-2.5 text-sm disabled:opacity-40">
+                ← Prev
+              </button>
+              <button onClick={() => setCurrentIdx(i => Math.min(questions.length - 1, i + 1))}
+                disabled={currentIdx === questions.length - 1}
+                className="btn-primary px-5 py-2.5 text-sm flex-1 justify-center disabled:opacity-40">
+                Next →
+              </button>
+            </div>
+          </div>
+
+          {/* Navigator */}
+          <div className="card bg-white overflow-hidden h-fit">
+            <div className="bg-[var(--color-teal)] px-4 py-2.5">
+              <p className="text-white font-semibold text-xs uppercase tracking-wide">
+                Navigator
+              </p>
+            </div>
+            <div className="p-3 grid grid-cols-5 gap-1.5">
+              {questions.map((q, i) => {
+                const isAnswered = !!answers[q.id]
+                const isFlag = flagged[q.id]
+                const isCurrent = i === currentIdx
+                return (
+                  <button key={q.id} onClick={() => setCurrentIdx(i)}
+                    className={`w-full aspect-square rounded-lg text-xs font-bold
+                                transition-all border-2 relative
+                      ${isCurrent
+                        ? 'border-[var(--color-ink)] bg-[var(--color-ink)] text-white'
+                        : isAnswered
+                          ? 'border-[var(--color-teal)] bg-[#e8f4f4] text-[var(--color-teal)]'
+                          : 'border-[var(--color-border)] text-[var(--color-muted)]'}`}>
+                    {i + 1}
+                    {isFlag && <Flag size={10} className="absolute -top-1 -right-1 text-red-500" />}
+                  </button>
+                )
+              })}
+            </div>
+            <div className="px-3 pb-3 space-y-1.5 text-[10px] font-mono text-[var(--color-muted)]">
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 rounded border-2 border-[var(--color-teal)] bg-[#e8f4f4]" />
+                Answered ({answered})
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 rounded border-2 border-[var(--color-border)]" />
+                Unanswered ({unanswered})
+              </div>
+              <div className="flex items-center gap-2">
+                <Flag size={12} /> Flagged
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── REPORT ───────────────────────────────────────────────
+  if (screen === 'report' && report) {
+    const grade = getGrade(report.percentage)
+    const cfg = GRADE_CONFIG[grade]
+    const mins = Math.floor(report.timeTaken / 60)
+    const secs = report.timeTaken % 60
+    const wrong = report.answers.filter(a => !a.is_correct)
+    const correct = report.answers.filter(a => a.is_correct)
+
+    return (
+      <div className="max-w-4xl mx-auto px-4 py-10">
+
+        {toast && (
+          <XPToast
+            xpGained={toast.xpGained}
+            newBadges={toast.newBadges}
+            onDone={() => setToast(null)}
+          />
+        )}
+
+        <div className="card overflow-hidden mb-6">
+          <div className={`${cfg.bg} px-8 py-8 text-center text-white`}>
+            {report.autoSubmit && (
+              <div className="bg-white/20 rounded-xl px-4 py-2 text-sm mb-4 inline-block">
+                <Clock size={18} className="inline-block mr-2" /> Time expired - auto submitted
+              </div>
+            )}
+            <div className="font-serif font-black text-8xl mb-2">{grade}</div>
+            <div className="text-3xl font-black mb-1">{report.percentage}%</div>
+            <div className="text-white/80 text-lg">{cfg.label}</div>
+          </div>
+
+          <div className="bg-white p-6">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+              {[
+                { label: 'Correct', value: report.score, color: 'text-green-600' },
+                { label: 'Wrong', value: wrong.length, color: 'text-red-500' },
+                { label: 'Total', value: report.total, color: 'text-[var(--color-ink)]' },
+                { label: 'Time', value: `${mins}m ${secs}s`, color: 'text-[var(--color-teal)]' },
+              ].map(s => (
+                <div key={s.label} className="bg-[var(--color-paper)] rounded-xl p-4 text-center">
+                  <div className={`font-serif font-black text-2xl ${s.color}`}>{s.value}</div>
+                  <div className="font-mono text-[10px] uppercase tracking-widest
+                                  text-[var(--color-muted)] mt-1">{s.label}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-[#e8f4f4] border border-[var(--color-teal)]
+                            rounded-2xl p-5 mb-4">
+              <p className="font-mono text-[10px] uppercase tracking-widest
+                             text-[var(--color-teal)] mb-2">
+                <Brain size={16} className="inline-block mr-1" /> Euler's Feedback
+              </p>
+              {aiSummary ? (
+                <p className="text-[var(--color-ink)] text-sm leading-relaxed">{aiSummary}</p>
+              ) : (
+                <div className="space-y-2">
+                  <div className="h-3 bg-[var(--color-teal)]/20 rounded animate-pulse w-full" />
+                  <div className="h-3 bg-[var(--color-teal)]/20 rounded animate-pulse w-4/5" />
+                  <div className="h-3 bg-[var(--color-teal)]/20 rounded animate-pulse w-3/5" />
+                  <p className="text-xs text-[var(--color-teal)]/60 mt-1 italic">
+                    Generating personalised feedback…
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="grid gap-3">
+              <button onClick={() => {
+                  setReport(null)
+                  setScreen('setup')
+                }}
+                className="w-full btn-secondary py-3 text-sm justify-center">
+                <RefreshCw size={18} className="inline-block mr-2" /> New Exam
+              </button>
+              <button onClick={startExam}
+                disabled={loadingSetup}
+                className="w-full btn-primary py-3 text-sm justify-center disabled:opacity-50">
+                {loadingSetup ? <><RefreshCw size={18} className="animate-spin mr-2" /> Retaking...</> : '↻ Retake This Exam'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="card overflow-hidden">
+          <div className="bg-[var(--color-ink)] px-6 py-4 flex items-center justify-between">
+            <p className="font-serif font-bold text-white text-lg flex items-center gap-2"><ClipboardList size={22} /> Question Review</p>
+            <div className="flex gap-3 text-sm text-white/70">
+              <span className="flex items-center gap-1"><Check size={16} /> {correct.length} correct</span>
+              <span className="flex items-center gap-1"><X size={16} /> {wrong.length} wrong</span>
+            </div>
+          </div>
+
+          <div className="divide-y divide-[var(--color-border)]">
+            {report.answers.map((a, i) => (
+              <div key={i} className="bg-white">
+                <button
+                  onClick={() => {
+                    setExpandedQ(expandedQ === i ? null : i)
+                    if (!explanations[a.question_id] && !loadingExpl[a.question_id]) {
+                      fetchExplanation(a)
+                    }
+                  }}
+                  className="w-full text-left px-5 py-4 flex items-start gap-3
+                             hover:bg-[var(--color-cream)] transition-colors"
+                >
+                  <span className={`shrink-0 w-7 h-7 rounded-full flex items-center
+                                    justify-center text-white text-xs font-bold mt-0.5
+                    ${a.is_correct ? 'bg-green-500' : 'bg-red-500'}`}>
+                    {a.is_correct ? <Check size={14} /> : <X size={14} />}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-[var(--color-ink)] leading-snug">
+                      {i + 1}. {a.question_text}
+                    </p>
+                    <div className="flex items-center gap-3 mt-1.5 text-xs flex-wrap">
+                      <span className={a.is_correct ? 'text-green-600' : 'text-red-500'}>
+                        You: {a.student_answer || 'Skipped'}
+                      </span>
+                      {!a.is_correct && (
+                        <span className="text-green-600">Correct: {a.correct_answer}</span>
+                      )}
+                      {a.topic && (
+                        <span className="text-[var(--color-muted)]">{a.topic}</span>
+                      )}
+                    </div>
+                  </div>
+                  <span className="text-[var(--color-muted)] text-xs shrink-0 mt-1">
+                    {expandedQ === i ? '▲' : '▼'}
+                  </span>
+                </button>
+
+                {expandedQ === i && (
+                  <div className="px-5 pb-5 bg-[var(--color-paper)]
+                                  border-t border-[var(--color-border)]">
+
+                    {questions.find(q => q.id === a.question_id)?.image_url && (
+                      <div className="mt-4 mb-2 flex justify-center">
+                        <img
+                          src={questions.find(q => q.id === a.question_id).image_url}
+                          alt="Question diagram"
+                          className="max-w-full max-h-64 rounded-xl border-2
+                                     border-[var(--color-border)] object-contain"
+                          onError={e => e.target.style.display = 'none'}
+                        />
+                      </div>
+                    )}
+
+                    <div className="space-y-2 mt-4 mb-4">
+                      {['A', 'B', 'C', 'D', ...(a.option_e ? ['E'] : [])].map(letter => (
+                        <OptionBtn key={letter} letter={letter}
+                          text={a[`option_${letter.toLowerCase()}`]}
+                          selected={a.student_answer} correct={a.correct_answer}
+                          revealed={true} onClick={() => { }}
+                        />
+                      ))}
+                    </div>
+
+                    <div className="bg-white border border-[var(--color-border)]
+                                    rounded-xl p-4 mt-3">
+                      <p className="font-mono text-[10px] uppercase tracking-widest
+                                     text-[var(--color-teal)] mb-2">
+                        <Brain size={16} className="inline-block mr-1" /> Euler's Explanation
+                      </p>
+                      {loadingExpl[a.question_id] ? (
+                        <div className="space-y-2">
+                          {[...Array(3)].map((_, j) => (
+                            <div key={j} className="h-3 bg-[var(--color-border)]
+                                                     rounded animate-pulse" />
+                          ))}
+                        </div>
+                      ) : explanations[a.question_id] ? (
+                        <ExplanationBody text={explanations[a.question_id]} />
+                      ) : (
+                        <p className="text-sm text-[var(--color-muted)]">
+                          Loading explanation...
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return null
+}

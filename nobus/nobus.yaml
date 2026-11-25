@@ -1,0 +1,106 @@
+# Nobus Cloud Deployment Configuration
+# This file defines the infrastructure for MathGenius on Nobus Cloud
+
+project: mathgenius-hackathon
+
+# Frontend - Static Site Hosting
+frontend:
+  name: mathgenius-frontend
+  type: static-site
+  build:
+    command: npm run build
+    directory: frontend
+    output: dist
+  environment:
+    VITE_API_URL: https://api.mathgenius.guru
+    VITE_SUPABASE_URL: ${SUPABASE_URL}
+    VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+  domains:
+    - mathgenius.guru
+    - www.mathgenius.guru
+
+# Backend - Python FastAPI Service
+backend:
+  name: mathgenius-backend
+  type: python-service
+  build:
+    command: pip install -r requirements-prod.txt
+    directory: backend
+  runtime: python3.11
+  start: uvicorn app.main:app --host 0.0.0.0 --port ${PORT}
+  environment:
+    GROQ_API_KEY: ${GROQ_API_KEY}
+    SUPABASE_URL: ${SUPABASE_URL}
+    SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+    SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+    DATABASE_URL: ${DATABASE_URL}
+    SMTP_HOST: ${SMTP_HOST}
+    SMTP_PORT: ${SMTP_PORT}
+    SMTP_USER: ${SMTP_USER}
+    SMTP_PASSWORD: ${SMTP_PASSWORD}
+    SMTP_REPLY_TO: ${SMTP_REPLY_TO}
+    ADMIN_EMAILS: ${ADMIN_EMAILS}
+    ADMIN_EMAIL: ${ADMIN_EMAIL}
+    SMTP_REPLY_TO: ${SMTP_REPLY_TO}
+    FRONTEND_URL: ${FRONTEND_URL}
+    ENVIRONMENT: production
+
+# Database - Nobus Managed PostgreSQL
+database:
+  name: mathgenius-db
+  type: postgresql
+  version: "16"
+  flavor: standard
+  size_gb: 20
+  username: mathgenius_admin
+  # password: auto-generated (save immediately!)
+  zone: nobus-wa-az1
+  encrypted: true
+  version: "16"
+
+# Object Storage for file uploads
+storage:
+  buckets:
+    - name: mathgenius-uploads
+      public: false
+      versioning: true
+      lifecycle:
+        - action: delete
+          age_days: 90
+
+# Domains & DNS
+domains:
+  - name: mathgenius.guru
+    type: primary
+    records:
+      - type: A
+        name: "@"
+        value: auto
+      - type: CNAME
+        name: www
+        value: mathgenius.guru
+      - type: CNAME
+        name: api
+        value: mathgenius-backend.nobus.app
+
+# SSL/TLS
+ssl:
+  provider: nobus-managed
+  auto_renew: true
+
+# Monitoring & Alerts
+monitoring:
+  health_checks:
+    - path: /health
+      interval: 30s
+      timeout: 10s
+  alerts:
+    - metric: cpu_usage
+      threshold: 80%
+      duration: 5m
+    - metric: memory_usage
+      threshold: 85%
+      duration: 5m
+    - metric: error_rate
+      threshold: 5%
+      duration: 2m

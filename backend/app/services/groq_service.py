@@ -1,0 +1,204 @@
+import os
+import asyncio
+from groq import AsyncGroq, RateLimitError, APITimeoutError
+from dotenv import load_dotenv
+
+load_dotenv()
+
+client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+
+SYSTEM_PROMPT = r"""You are Euler, a friendly and brilliant mathematics tutor for 
+primary school, secondary school, and university students in Nigeria and beyond.
+
+TONE: Warm, encouraging, patient. Talk like a brilliant friend, not a textbook.
+Say things like "Great question!", "Let's work through this together!", "You've got this!"
+
+STRUCTURE for every response:
+- Start with one warm sentence
+- Give a brief plain-English explanation of the concept
+- Show ALL methods clearly separated by ### headings
+- End with ### Which Method Should You Use? and ### Quick Tips to Remember
+
+METHODS TO SHOW:
+- Quadratic equations: Factorisation, Completing the Square, Quadratic Formula, Graphical
+- Simultaneous equations: Substitution, Elimination, Matrix method  
+- Differentiation: First Principles, then using Rules
+- Integration: all applicable techniques
+
+STEPS FORMAT — every step must be on its own line, clearly numbered:
+1. First do this thing
+
+2. Then do this next thing
+
+3. Then this
+
+Never run steps together on one line.
+
+MATH FORMAT (follow exactly — the app renders nothing else): for ALL
+mathematics use [m]...[/m] for inline expressions (e.g. [m]x^2[/m]) and put
+each display equation on its own lines inside [math]...[/math] tags.
+Never use \\(...\\), \\[...\\], $ or $$ delimiters.
+
+CURRICULUM — full Nigerian primary, secondary school, and university syllabus:
+Primary: Counting, place value, basic operations, fractions, money, shapes, measurement, and simple data handling
+Secondary: Number Bases, Surds, Indices, Logarithms, Bearings, Longitude & Latitude,
+Earth Geometry, Quadratic Equations, Polynomials, Variation, Sequences, Binomial 
+Expansion, Trigonometry, Circle Theorems, Mensuration, Matrices, Vectors, Statistics, Probability
+
+University: Calculus I & II, Multivariable Calculus, Differential Equations,
+Linear Algebra, Complex Numbers, Numerical Methods, Laplace Transforms,
+Fourier Series, Engineering Mathematics (K.A. Stroud level)
+"""
+
+# ── Groq call with timeout + exponential backoff retry ───────────────────────
+_GROQ_TIMEOUT   = 30.0   # seconds before a single attempt is abandoned
+_GROQ_MAX_TRIES = 3      # maximum attempts before giving up
+
+async def _groq_with_retry(fn, *args, **kwargs):
+    """
+    Calls `fn(*args, **kwargs)` up to _GROQ_MAX_TRIES times.
+    Retries on RateLimitError and APITimeoutError with exponential back-off.
+    All other exceptions propagate immediately.
+    """
+    for attempt in range(_GROQ_MAX_TRIES):
+        try:
+            return await fn(*args, **kwargs)
+        except (RateLimitError, APITimeoutError) as exc:
+            if attempt == _GROQ_MAX_TRIES - 1:
+                raise          # last attempt — re-raise
+            wait = 2 ** attempt   # 1s, 2s, 4s …
+            print(f"[Groq] {type(exc).__name__} — retrying in {wait}s (attempt {attempt+1})")
+            await asyncio.sleep(wait)
+
+
+async def ask_groq(
+    user_message: str,
+    conversation_history: list = None,
+    image_base64: str = None,
+    image_type: str = "image/jpeg",
+    rag_query: str = None,
+    rag_level: str = None,
+) -> str:
+    """
+    Async version — awaitable, does not block the event loop.
+    Use this for non-streaming responses (overview, wiki, grading etc.)
+    """
+    if conversation_history is None:
+        conversation_history = []
+    messages = await _build_messages(
+        user_message,
+        conversation_history,
+        image_base64,
+        image_type,
+        rag_query=rag_query,
+        rag_level=rag_level,
+    )
+
+    async def _call():
+        return await client.chat.completions.create(
+            model=_model(image_base64),
+            messages=messages,
+            temperature=0.7,
+            max_tokens=4096,
+            timeout=_GROQ_TIMEOUT,
+        )
+
+    response = await _groq_with_retry(_call)
+    raw = response.choices[0].message.content
+    from app.services.latex_cleaner import clean_response
+    return clean_response(raw)
+
+
+async def ask_groq_stream(
+    user_message: str,
+    conversation_history: list = None,
+    image_base64: str = None,
+    image_type: str = "image/jpeg",
+    rag_query: str = None,
+    rag_level: str = None,
+):
+    """
+    Async generator — yields text chunks as they arrive from Groq.
+    Use this for the /teach/ask streaming endpoint.
+    """
+    if conversation_history is None:
+        conversation_history = []
+    messages = await _build_messages(
+        user_message,
+        conversation_history,
+        image_base64,
+        image_type,
+        rag_query=rag_query,
+        rag_level=rag_level,
+    )
+
+    stream = await client.chat.completions.create(
+        model=_model(image_base64),
+        messages=messages,
+        temperature=0.7,
+        max_tokens=4096,
+        stream=True,
+        timeout=_GROQ_TIMEOUT,
+    )
+    async for chunk in stream:
+        token = chunk.choices[0].delta.content
+        if token:
+            yield token
+
+
+# ── Internal helpers ──────────────────────────────────────────────────
+
+def _model(image_base64):
+    # Groq retired the old Llama models — the current key only serves the
+    # models below (verified live). Overridable via env without a code push.
+    if image_base64:
+        return os.getenv("GROQ_VISION_MODEL", "openai/gpt-oss-20b")
+    return os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+
+
+async def _build_messages(
+    user_message,
+    conversation_history,
+    image_base64,
+    image_type,
+    rag_query=None,
+    rag_level=None,
+):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # RAG context — only for text questions. Best-effort: the production
+    # install intentionally omits torch/qdrant (too heavy for the free tier),
+    # so the retriever may not even be importable there. AI must work regardless.
+    retrieval_query = (rag_query or user_message or "").strip()
+    if not image_base64 and retrieval_query:
+        try:
+            from app.rag.retriever import retrieve_context
+            context = retrieve_context(retrieval_query, level=rag_level)
+        except Exception:
+            context = None
+        if context:
+            messages.append({"role": "system", "content": context})
+
+    # Conversation history
+    for turn in conversation_history:
+        messages.append(turn)
+
+    # User message
+    if image_base64:
+        content = [
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{image_type};base64,{image_base64}"},
+            },
+            {
+                "type": "text",
+                "text": user_message or "Please read this image and solve the mathematics question. Show ALL methods.",
+            },
+        ]
+    else:
+        content = user_message
+
+    messages.append({"role": "user", "content": content})
+    return messages
+
+

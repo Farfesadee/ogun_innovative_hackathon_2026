@@ -1,0 +1,753 @@
+import { Link, useNavigate } from 'react-router-dom'
+import { useAuth } from '../context/AuthContext'
+import { useEffect, useState, useRef } from 'react'
+import { askTutor, getApprovedTestimonials } from '../services/api'
+import { ExplanationBody } from '../utils/RenderMath'
+import { Lightbulb, Monitor, BarChart3, Flame, Calendar, BookOpen, Triangle, Rocket, Calculator, ArrowRight, FileText, Trophy, Star, Globe, AlertTriangle, ChevronDown, Send, Check } from 'lucide-react'
+import { supabase } from '../lib/supabase'
+import { CONNECTION_ERROR } from '../utils/friendlyError'
+
+const FEATURES = [
+  {
+    icon: Lightbulb,
+    title: 'AI Explanations',
+    desc: 'Ask Euler, our AI tutor, to explain any maths concept in simple terms, step by step.',
+  },
+  {
+    icon: Monitor,
+    title: 'CBT Simulations',
+    desc: 'Practice with real WAEC, NECO and JAMB past questions in a timed exam environment.',
+  },
+  {
+    icon: BarChart3,
+    title: 'Topic Mastery',
+    desc: 'See exactly which topics you\'re strong or weak in, with visual progress tracking.',
+  },
+  {
+    icon: Flame,
+    title: 'Streak & XP System',
+    desc: 'Earn XP for every session, maintain daily streaks and climb the leaderboard.',
+  },
+  {
+    icon: Calendar,
+    title: 'AI Study Planner',
+    desc: 'Euler builds a personalised 7-day study plan based on your weak areas.',
+  },
+  {
+    icon: BookOpen,
+    title: 'Formula Sheet',
+    desc: '70+ WAEC & JAMB formulas in one searchable reference, always at your fingertips.',
+  },
+]
+
+
+
+const MAX_FREE = 5
+
+const DEMO_TOPICS = [
+  'Quadratic Equations', 'Differentiation', 'Trigonometry',
+  'Probability', 'Logarithms',
+]
+
+const DEMO_STARTERS = [
+  'Explain quadratic equations',
+  'What is differentiation?',
+  'How do I calculate probability?',
+  'Simplify: log(100) + log(10)',
+  'Solve: 2x + 5 = 11',
+]
+
+function LandingChat() {
+  const [messages, setMessages] = useState([])
+  const [input, setInput] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [used, setUsed] = useState(0)
+  const [topic, setTopic] = useState('General Mathematics')
+  const bottomRef = useRef(null)
+  const inputRef = useRef(null)
+
+  // Only auto-scroll after the user actually chats — never on page load,
+  // or refresh would yank visitors down to the demo on every visit.
+  useEffect(() => {
+    if (messages.length > 0) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages])
+
+  const handleSend = async (text) => {
+    const msg = (text || input).trim()
+    if (!msg || loading || used >= MAX_FREE) return
+    setInput('')
+    const newUsed = used + 1
+    setUsed(newUsed)
+    setMessages(prev => [...prev, { role: 'user', content: msg }])
+    setLoading(true)
+    setMessages(prev => [...prev, { role: 'assistant', loading: true }])
+    try {
+      const history = messages.slice(-6).map(m => ({ role: m.role, content: m.content || '' }))
+      const res = await askTutor(msg, topic, 'secondary', history)
+      const reply = res.data.response || res.data.answer || ''
+      setMessages(prev => [...prev.filter(m => !m.loading), { role: 'assistant', content: reply }])
+    } catch {
+      setMessages(prev => [
+        ...prev.filter(m => !m.loading),
+          { role: 'assistant', content: CONNECTION_ERROR },
+      ])
+    }
+    setLoading(false)
+    inputRef.current?.focus()
+  }
+
+  const limitReached = used >= MAX_FREE
+  const remaining = MAX_FREE - used
+
+  return (
+    <div className="max-w-2xl mx-auto">
+      {/* Header */}
+      <div className="bg-[var(--color-teal)] rounded-t-2xl px-5 py-4
+                      flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-white/20 flex items-center
+                          justify-center font-serif font-black text-white text-lg">E</div>
+          <div>
+            <p className="font-serif font-bold text-white">Euler - AI Maths Tutor</p>
+            <p className="text-white/70 text-xs">
+              {limitReached ? 'Sign up for unlimited access' : `${remaining} free question${remaining !== 1 ? 's' : ''} remaining`}
+            </p>
+          </div>
+        </div>
+        <Link to="/signup"
+          className="text-xs font-bold text-white/80 hover:text-white
+                     border border-white/30 rounded-xl px-3 py-1.5 transition-colors">
+          Sign up free →
+        </Link>
+      </div>
+
+      {/* Topic chips */}
+      <div className="bg-white border-x border-[var(--color-border)]
+                      px-4 py-2 flex gap-2 overflow-x-auto scrollbar-none">
+        {DEMO_TOPICS.map(t => (
+          <button key={t} onClick={() => setTopic(t)}
+            className={`shrink-0 px-3 py-1 rounded-lg text-[11px] font-semibold
+                        border transition-all
+              ${topic === t
+                ? 'border-[var(--color-teal)] bg-[#e8f4f4] text-[var(--color-teal)]'
+                : 'border-[var(--color-border)] text-[var(--color-muted)] hover:border-[var(--color-teal)]'}`}>
+            {t}
+          </button>
+        ))}
+      </div>
+
+      {/* Messages */}
+      <div className="bg-[var(--color-paper)] border-x border-[var(--color-border)]
+                      h-72 overflow-y-auto px-4 py-4 space-y-3">
+        {messages.length === 0 && (
+          <div className="h-full flex flex-col items-center justify-center text-center gap-3">
+            <Calculator size={48} strokeWidth={1.5} className="text-[var(--color-teal)]" />
+            <p className="font-serif font-bold text-[var(--color-ink)] text-lg">
+              Try Euler: no account needed
+            </p>
+            <p className="text-sm text-[var(--color-muted)] max-w-xs">
+              Ask any WAEC, JAMB, NECO or BECE maths question and get a full step-by-step explanation.
+            </p>
+            <div className="flex flex-wrap gap-2 justify-center mt-2">
+              {DEMO_STARTERS.map(q => (
+                <button key={q} onClick={() => handleSend(q)}
+                  className="text-xs px-3 py-1.5 bg-white border border-[var(--color-border)]
+                             rounded-full text-[var(--color-ink)] hover:bg-[var(--color-teal)]
+                             hover:text-white hover:border-[var(--color-teal)] transition-all">
+                  {q}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {messages.map((msg, i) => (
+          <div key={i} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            {msg.role === 'assistant' && (
+              <div className="w-6 h-6 rounded-full bg-[var(--color-teal)] flex items-center
+                              justify-center text-white text-xs font-bold shrink-0 mt-0.5">E</div>
+            )}
+            <div className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm
+              ${msg.role === 'user'
+                ? 'bg-[var(--color-ink)] text-white rounded-br-sm'
+                : 'bg-white border border-[var(--color-border)] rounded-bl-sm'}`}>
+              {msg.loading ? (
+                <div className="flex gap-1 py-1">
+                  {[0, 1, 2].map(j => (
+                    <span key={j} className="w-1.5 h-1.5 rounded-full bg-[var(--color-teal)] animate-bounce"
+                      style={{ animationDelay: `${j * 0.15}s` }} />
+                  ))}
+                </div>
+              ) : msg.role === 'user' ? (
+                <p>{msg.content}</p>
+              ) : (
+                <ExplanationBody text={msg.content} />
+              )}
+            </div>
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input or CTA */}
+      <div className="bg-white border-2 border-[var(--color-ink)] rounded-b-2xl
+                      px-4 py-3">
+        {limitReached ? (
+          <div className="text-center py-2">
+            <p className="text-sm font-semibold text-[var(--color-ink)] mb-3">
+              You've used your 5 free questions!
+            </p>
+            <Link to="/signup"
+              className="btn-primary px-6 py-2.5 text-sm justify-center inline-flex">
+              <Rocket size={16} className="inline" /> Sign up free for unlimited access
+            </Link>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <input
+              ref={inputRef}
+              type="text"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && !loading && handleSend()}
+              placeholder={`Ask about ${topic === 'General Mathematics' ? 'any maths topic' : topic}...`}
+              className="flex-1 bg-[var(--color-paper)] border border-[var(--color-border)]
+                         focus:border-[var(--color-teal)] rounded-xl px-3 py-2.5 text-sm
+                         transition-colors"
+            />
+            <button
+              onClick={() => handleSend()}
+              disabled={!input.trim() || loading}
+              className="w-10 h-10 rounded-xl bg-[var(--color-teal)] text-white
+                         flex items-center justify-center disabled:opacity-40
+                         hover:bg-[var(--color-ink)] transition-colors shrink-0">
+              {loading
+                ? <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                : <ArrowRight size={18} strokeWidth={2.5} />
+              }
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const STATS = [
+  { value: '10,000+', label: 'Past Questions' },
+  { value: '70+', label: 'Formulas' },
+  { value: '3', label: 'Exam Types' },
+  { value: '100%', label: 'Free to Start' },
+]
+
+function FaqItem({ q, a, open, onToggle }) {
+  return (
+    <div className="border-2 border-[var(--color-border)] rounded-2xl
+                    bg-white overflow-hidden transition-colors
+                    hover:border-[var(--color-ink)]">
+      <button onClick={onToggle} aria-expanded={open}
+        className="w-full flex items-center justify-between gap-3
+                   px-5 py-4 text-left">
+        <span className="font-bold text-sm text-[var(--color-ink)]">{q}</span>
+        <ChevronDown size={20}
+          className={`shrink-0 text-[var(--color-teal)] transition-transform duration-300
+                      ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <p className="px-5 pb-5 text-sm leading-relaxed text-[var(--color-muted)]">
+          {a}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function NewsletterForm() {
+  const [email, setEmail] = useState('')
+  const [status, setStatus] = useState('idle') // idle | sending | done | error | taken
+
+  const subscribe = async (e) => {
+    e.preventDefault()
+    const clean = email.trim()
+    if (!clean || !clean.includes('@')) { setStatus('error'); return }
+    setStatus('sending')
+    try {
+      const { error } = await supabase
+        .from('newsletter_subscribers')
+        .insert({ email: clean })
+      if (error) {
+        setStatus(/duplicate|unique|already/i.test(error.message || '') ? 'taken' : 'error')
+      } else {
+        setStatus('done')
+      }
+    } catch {
+      setStatus('error')
+    }
+  }
+
+  if (status === 'done') {
+    return (
+      <p className="flex items-center gap-2 text-sm font-semibold text-[var(--color-teal)]">
+        <Check size={18} /> You are on the list. Welcome aboard!
+      </p>
+    )
+  }
+
+  return (
+    <form onSubmit={subscribe} className="w-full max-w-sm">
+      <p className="font-bold text-sm text-[var(--color-ink)] mb-2">
+        Study tips, monthly. No spam.
+      </p>
+      <div className="flex gap-2">
+        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@example.com" aria-label="Email for newsletter"
+          className="flex-1 min-w-0 border-2 border-[var(--color-border)]
+                     focus:border-[var(--color-teal)] rounded-xl px-4 py-2.5
+                     text-sm transition-colors bg-white" />
+        <button type="submit" disabled={status === 'sending'}
+          className="px-4 py-2.5 rounded-xl text-sm font-bold shrink-0
+                     bg-[var(--color-ink)] text-[var(--color-paper)]
+                     hover:bg-[var(--color-teal)] transition-colors
+                     disabled:opacity-50">
+          <Send size={16} className="inline-block" />
+        </button>
+      </div>
+      {status === 'taken' && (
+        <p className="text-xs text-[var(--color-muted)] mt-2">
+          This email is already subscribed.
+        </p>
+      )}
+      {status === 'error' && (
+        <p className="text-xs text-red-600 mt-2">
+          Something went wrong. Check the email and try again.
+        </p>
+      )}
+    </form>
+  )
+}
+
+export default function Landing() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const [scrolled, setScrolled] = useState(false)
+  const [faqOpen, setFaqOpen] = useState(-1)
+  const [testimonials, setTestimonials]   = useState([])
+  const [testimonialsLoading, setTestimonialsLoading] = useState(true)
+
+  useEffect(() => {
+    const handler = () => setScrolled(window.scrollY > 50)
+    window.addEventListener('scroll', handler)
+    return () => window.removeEventListener('scroll', handler)
+  }, [])
+
+  useEffect(() => {
+    getApprovedTestimonials().then(({ data }) => {
+      setTestimonials(data || [])
+      setTestimonialsLoading(false)
+    }).catch(() => setTestimonialsLoading(false))
+  }, [])
+
+  // Routes new guests through onboarding; returning guests go straight to signup
+  const handleGoToApp = (e) => {
+    e.preventDefault()
+    if (user) {
+      navigate('/dashboard')
+    } else if (localStorage.getItem('mg_onboarding_done')) {
+      navigate('/signup')
+    } else {
+      navigate('/onboarding')
+    }
+  }
+
+  return (
+    <div id="main-content" className="min-h-screen bg-[var(--color-paper)]">
+
+      {/* ── NAV ──────────────────────────────────────────── */}
+      <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300
+                       ${scrolled
+          ? 'bg-[var(--color-paper)] border-b-2 border-[var(--color-ink)] shadow-sm'
+          : 'bg-transparent'}`}>
+        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+          <span className="font-serif font-black text-2xl tracking-tight">
+            Math<span className="text-[var(--color-gold)]">Genius</span>
+          </span>
+          <div className="flex items-center gap-3">
+            {user ? (
+              <button onClick={handleGoToApp} className="btn-primary px-5 py-2 text-sm">
+                Go to App →
+              </button>
+            ) : (
+              <>
+                <Link to="/login"
+                  className="text-sm font-semibold text-[var(--color-ink)]
+                             hover:text-[var(--color-teal)] transition-colors
+                             hidden sm:block">
+                  Sign In
+                </Link>
+                <button onClick={handleGoToApp} className="btn-primary px-5 py-2 text-sm">
+                  Go to App →
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </nav>
+
+      {/* ── HERO ─────────────────────────────────────────── */}
+      <section className="pt-32 pb-20 px-6">
+        <div className="max-w-4xl mx-auto text-center">
+          <div className="inline-flex items-center gap-2 bg-[var(--color-teal)]/10
+                          border border-[var(--color-teal)] rounded-full
+                          px-4 py-2 text-sm font-mono text-[var(--color-teal)]
+                          mb-6">
+            <Globe size={16} className="inline" /> Built for Nigerian students
+          </div>
+
+          <h1 className="font-serif font-black text-5xl sm:text-6xl lg:text-7xl
+                         tracking-tight leading-[1.05] mb-6">
+            Ace Your{' '}
+            <span className="text-[var(--color-teal)]">JAMB</span>
+            {', '}
+            <span className="text-[var(--color-gold)]">WAEC</span>
+            {', '}
+            <span className="text-[var(--color-teal)]">NECO</span>
+            {' & '}
+            <span className="text-[var(--color-gold)]">BECE</span>
+            {' '}Mathematics Examinations.
+          </h1>
+
+          <p className="text-xl text-[var(--color-muted)] max-w-2xl mx-auto mb-10
+                         leading-relaxed">
+            Nigeria's most powerful AI maths tutor. Practice past questions,
+            get instant explanations, track your progress and climb the leaderboard.
+          </p>
+
+          <div className="flex flex-col sm:flex-row gap-4 justify-center mb-16">
+            <Link to="/signup"
+              className="btn-primary px-8 py-4 text-base justify-center text-center">
+              <Rocket size={18} className="inline" /> Start Studying Free
+            </Link>
+            <Link to="/formulas"
+              className="btn-secondary px-8 py-4 text-base justify-center text-center">
+              <Triangle size={18} className="inline" /> View Formula Sheet
+            </Link>
+          </div>
+
+          {/* Stats row */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-2xl mx-auto">
+            {STATS.map(s => (
+              <div key={s.label}
+                className="bg-white border-2 border-[var(--color-border)]
+                              rounded-2xl p-4 text-center">
+                <div className="font-serif font-black text-3xl
+                                text-[var(--color-teal)]">
+                  {s.value}
+                </div>
+                <div className="font-mono text-[10px] uppercase tracking-widest
+                                text-[var(--color-muted)] mt-1">
+                  {s.label}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── DEMO CHAT ─────────────────────────────────────── */}
+      <section className="py-20 px-6 bg-[var(--color-cream)]">
+        <div className="max-w-5xl mx-auto">
+          <div className="text-center mb-10">
+            <p className="font-mono text-xs tracking-widest uppercase
+                          text-[var(--color-gold)] mb-3 flex items-center
+                          justify-center gap-3">
+              <span className="block w-8 h-px bg-[var(--color-gold)]" />
+              Try It Now - Free
+              <span className="block w-8 h-px bg-[var(--color-gold)]" />
+            </p>
+            <h2 className="font-serif font-black text-4xl sm:text-5xl tracking-tight">
+              Ask Euler anything
+            </h2>
+            <p className="text-[var(--color-muted)] mt-3 max-w-lg mx-auto">
+              Get 5 free explanations right now, no sign up needed.
+              Create a free account to unlock unlimited access.
+            </p>
+          </div>
+          <LandingChat />
+        </div>
+      </section>
+
+      {/* ── FEATURES ─────────────────────────────────────── */}
+      <section className="py-20 px-6">
+        <div className="max-w-5xl mx-auto">
+          <div className="text-center mb-12">
+            <p className="font-mono text-xs tracking-widest uppercase
+                          text-[var(--color-gold)] mb-3 flex items-center
+                          justify-center gap-3">
+              <span className="block w-8 h-px bg-[var(--color-gold)]" />
+              Features
+              <span className="block w-8 h-px bg-[var(--color-gold)]" />
+            </p>
+            <h2 className="font-serif font-black text-4xl sm:text-5xl tracking-tight">
+              Everything you need to pass
+            </h2>
+            <p className="text-[var(--color-muted)] mt-3 max-w-xl mx-auto">
+              One platform for all your maths exam preparation from learning
+              concepts to full CBT simulations.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+            {FEATURES.map((f, i) => {
+              const Icon = f.icon
+              return (
+                <div key={i}
+                  className="bg-[var(--color-cream)] border-2 border-[var(--color-border)]
+                                rounded-2xl p-6 hover:border-[var(--color-teal)]
+                                hover:shadow-md transition-all duration-200">
+                  <div className="text-[var(--color-teal)] mb-6">
+                    <Icon size={80} strokeWidth={1} />
+                  </div>
+                  <h3 className="font-serif font-bold text-lg
+                                 text-[var(--color-ink)] mb-2">
+                    {f.title}
+                  </h3>
+                  <p className="text-sm text-[var(--color-muted)] leading-relaxed">
+                    {f.desc}
+                  </p>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* ── HOW IT WORKS ─────────────────────────────────── */}
+      <section className="py-20 px-6">
+        <div className="max-w-4xl mx-auto">
+          <div className="text-center mb-12">
+            <p className="font-mono text-xs tracking-widest uppercase
+                          text-[var(--color-gold)] mb-3 flex items-center
+                          justify-center gap-3">
+              <span className="block w-8 h-px bg-[var(--color-gold)]" />
+              How It Works
+              <span className="block w-8 h-px bg-[var(--color-gold)]" />
+            </p>
+            <h2 className="font-serif font-black text-4xl sm:text-5xl tracking-tight">
+              Simple. Powerful. Effective.
+            </h2>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            {[
+              {
+                step: '01',
+                icon: FileText,
+                title: 'Create your account',
+                desc: 'Sign up free in seconds. No credit card needed.',
+              },
+              {
+                step: '02',
+                icon: BookOpen,
+                title: 'Study with Euler',
+                desc: 'Ask the AI tutor to explain any topic, then test yourself with real past questions.',
+              },
+              {
+                step: '03',
+                icon: Trophy,
+                title: 'Track & improve',
+                desc: 'See your weak topics, earn XP, maintain streaks and climb the leaderboard.',
+              },
+            ].map((s, i) => (
+              <div key={i} className="relative">
+                {i < 2 && (
+                  <div className="hidden sm:block absolute top-8 left-full
+                                  w-full h-px bg-[var(--color-border)] z-0
+                                  -translate-y-0.5" />
+                )}
+                <div className="relative z-10 text-center">
+                  <div className="w-16 h-16 rounded-2xl bg-[var(--color-ink)]
+                                  flex items-center justify-center
+                                  mx-auto mb-4">
+                    {(() => { const Icon = s.icon; return <Icon size={28} strokeWidth={1.5} className="text-white" /> })()}
+                  </div>
+                  <div className="font-mono text-[10px] text-[var(--color-gold)]
+                                  tracking-widest uppercase mb-2">
+                    Step {s.step}
+                  </div>
+                  <h3 className="font-serif font-bold text-lg
+                                 text-[var(--color-ink)] mb-2">
+                    {s.title}
+                  </h3>
+                  <p className="text-sm text-[var(--color-muted)] leading-relaxed">
+                    {s.desc}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── TESTIMONIALS ─────────────────────────────────── */}
+      <section className="py-20 px-6 bg-[var(--color-ink)]">
+        <div className="max-w-5xl mx-auto">
+          <div className="text-center mb-12">
+            <p className="font-mono text-xs tracking-widest uppercase
+                          text-[var(--color-gold)] mb-3 flex items-center
+                          justify-center gap-3">
+              <span className="block w-8 h-px bg-[var(--color-gold)]" />
+              Student Results
+              <span className="block w-8 h-px bg-[var(--color-gold)]" />
+            </p>
+            <h2 className="font-serif font-black text-4xl sm:text-5xl
+                           tracking-tight text-white">
+              Students are passing
+            </h2>
+          </div>
+
+          {/* Loading skeletons */}
+          {testimonialsLoading && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+              {[0,1,2].map(i => (
+                <div key={i} className="bg-white/5 border border-white/10 rounded-2xl p-6 space-y-3 animate-pulse">
+                  <div className="h-4 bg-white/10 rounded w-1/3" />
+                  <div className="h-3 bg-white/10 rounded w-full" />
+                  <div className="h-3 bg-white/10 rounded w-5/6" />
+                  <div className="h-3 bg-white/10 rounded w-4/6" />
+                  <div className="h-4 bg-white/10 rounded w-1/2 mt-4" />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* No reviews yet */}
+          {!testimonialsLoading && testimonials.length === 0 && (
+            <div className="text-center py-10">
+              <p className="text-white/50 text-sm">
+                No reviews yet, be the first to share your result after completing a mock exam!
+              </p>
+            </div>
+          )}
+
+          {/* Live testimonials */}
+          {!testimonialsLoading && testimonials.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+              {testimonials.map(t => (
+                <div key={t.id}
+                  className="bg-white/5 border border-white/10 rounded-2xl p-6
+                             flex flex-col gap-3">
+                  {/* Stars */}
+                  <div className="flex gap-0.5 text-base">
+                    {[1,2,3,4,5].map(s => (
+                      <span key={s}>{s <= t.rating ? <Star size={16} className="inline fill-current text-[var(--color-gold)]" /> : <Star size={16} className="inline text-[var(--color-muted)]" />}</span>
+                    ))}
+                  </div>
+                  <p className="text-white/90 text-sm leading-relaxed italic flex-1">
+                    "{t.body}"
+                  </p>
+                  <div>
+                    <p className="font-bold text-white text-sm">{t.full_name}</p>
+                    {t.school && (
+                      <p className="text-white/50 text-xs font-mono">{t.school}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* ── FAQ ──────────────────────────────────────────── */}
+      <section className="py-24 px-6 bg-[var(--color-paper)]">
+        <div className="max-w-2xl mx-auto">
+          <p className="font-mono text-xs tracking-widest uppercase
+                        text-[var(--color-gold)] mb-2 text-center">
+            FAQ
+          </p>
+          <h2 className="font-serif font-black text-4xl tracking-tight
+                         text-center mb-10">
+            Questions, answered
+          </h2>
+          <div className="space-y-3">
+            {[
+              { q: 'Is MathGenius free?', a: 'Yes. Practice, Euler explanations, CBT exams and progress tracking are free. Just create an account and start learning.' },
+              { q: 'Which exams does it cover?', a: 'WAEC, NECO and JAMB mathematics, with real past questions, worked solutions and timed CBT simulations in the exact exam format.' },
+              { q: 'How does Euler, the AI tutor, work?', a: 'Ask Euler any maths question in plain language. It explains step by step, answers follow-up questions and adjusts to your level, from JSS1 to university.' },
+              { q: 'Do I need an account to try it?', a: 'You can try a few free explanations with no account. Creating a free account unlocks saved progress, streaks, XP, the leaderboard and personalised study plans.' },
+              { q: 'How do streaks and XP work?', a: 'You earn XP for every session and question. Practise daily to grow your streak, climb the leaderboard and unlock badges.' },
+              { q: 'Can parents and teachers monitor progress?', a: 'Yes. Link accounts to follow study time, scores, streaks and weak topics from the Monitor dashboard.' },
+            ].map((item, i) => (
+              <FaqItem key={item.q} q={item.q} a={item.a}
+                open={faqOpen === i} onToggle={() => setFaqOpen(faqOpen === i ? -1 : i)} />
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── CTA ──────────────────────────────────────────── */}
+      <section className="py-24 px-6 bg-[var(--color-teal)]">
+        <div className="max-w-2xl mx-auto text-center">
+          <h2 className="font-serif font-black text-4xl sm:text-5xl
+                         tracking-tight text-white mb-4">
+            Ready to ace your exams?
+          </h2>
+          <p className="text-white/80 text-lg mb-10">
+            Join thousands of students already using MathGenius to prepare
+            for WAEC, JAMB and NECO.
+          </p>
+          <Link to="/signup"
+            className="inline-flex items-center gap-2 bg-white
+                       text-[var(--color-teal)] font-black font-serif
+                       text-lg px-10 py-4 rounded-2xl
+                       hover:bg-[var(--color-cream)] transition-colors
+                       shadow-xl">
+            <Rocket size={20} className="inline" /> Start Free Today
+          </Link>
+          <p className="text-white/50 text-xs mt-4 font-mono">
+            No credit card required · Free forever
+          </p>
+        </div>
+      </section>
+
+      {/* ── FOOTER ───────────────────────────────────────── */}
+      <footer className="py-10 px-6 border-t-2 border-[var(--color-border)]
+                          bg-[var(--color-paper)]">
+        <div className="max-w-6xl mx-auto flex flex-wrap items-center
+                        justify-between gap-4">
+          <div>
+            <span className="font-serif font-black text-xl">
+              Math<span className="text-[var(--color-gold)]">Genius</span>
+            </span>
+            <p className="text-xs text-[var(--color-muted)] mt-1">
+              AI-powered maths prep for Nigerian students
+            </p>
+          </div>
+          <div className="flex gap-6 text-sm text-[var(--color-muted)]">
+            <Link to="/formulas"
+              className="hover:text-[var(--color-ink)] transition-colors">
+              Formula Sheet
+            </Link>
+            <Link to="/login"
+              className="hover:text-[var(--color-ink)] transition-colors">
+              Sign In
+            </Link>
+            <Link to="/signup"
+              className="hover:text-[var(--color-ink)] transition-colors">
+              Sign Up
+            </Link>
+            <Link to="/contact"
+              className="hover:text-[var(--color-ink)] transition-colors">
+              Contact
+            </Link>
+          </div>
+          <NewsletterForm />
+          <p className="text-xs text-[var(--color-muted)] font-mono">
+            © {new Date().getFullYear()} MathGenius
+          </p>
+        </div>
+      </footer>
+    </div>
+  )
+}

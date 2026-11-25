@@ -1,0 +1,120 @@
+import { useState, useEffect } from 'react'
+import { useLocalStorageState } from '../hooks/useLocalStorageState'
+
+const TEACH_LEVEL_KEY = 'mathgenius_teach_level'
+const TEACH_TOPIC_KEY = 'mathgenius_teach_topic'
+import TopicSidebar from '../components/teach/TopicSidebar'
+import ChatWindow from '../components/teach/ChatWindow'
+import ConversationSidebar from '../components/teach/ConversationSidebar'
+import { useAuth } from '../context/AuthContext'
+import { createConversation } from '../lib/conversations'
+import { supabase } from '../lib/supabase'
+
+export default function Teach() {
+  const { user, profile, updateProfile } = useAuth()
+  const [selectedTopic, setSelectedTopic] = useLocalStorageState(TEACH_TOPIC_KEY, null)
+  const [selectedLevel, setSelectedLevel] = useLocalStorageState(TEACH_LEVEL_KEY, 'secondary')
+
+  // Persist whenever level changes → Supabase profile (cross-device)
+  useEffect(() => {
+    if (profile && profile.level !== selectedLevel) {
+      updateProfile({ level: selectedLevel }).catch(() => {})
+    }
+  }, [selectedLevel, profile, updateProfile])
+  const [currentConversation,  setCurrentConversation]  = useState(null)
+  const [convRefreshKey,       setConvRefreshKey]        = useState(0)
+
+  // ── Restore last conversation on mount ───────────────────────────
+  useEffect(() => {
+    if (!user) return
+    supabase
+      .from('conversations')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('is_deleted', false)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .single()
+      .then(({ data }) => {
+        if (data) {
+          setCurrentConversation(data)
+          if (data.topic) setSelectedTopic(data.topic)
+        }
+      })
+  }, [user?.id])
+
+  const handleTopicSelect = async (topic) => {
+    setSelectedTopic(topic)
+    if (user) {
+      const { data } = await createConversation(user.id, topic, selectedLevel)
+      if (data) setCurrentConversation(data)
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  const handleNewConversation = (conv) => {
+    setCurrentConversation(conv)
+  }
+
+  const handleConversationUpdate = () => {
+    setConvRefreshKey(k => k + 1)
+  }
+
+  return (
+    <div className="max-w-[1400px] mx-auto px-6 py-10">
+      {/* Page header */}
+      <div className="mb-8">
+        <p className="font-mono text-xs tracking-widest uppercase
+                      text-[var(--color-gold)] mb-2 flex items-center gap-3">
+          <span className="block w-6 h-px bg-[var(--color-gold)]" />
+          Teach Module
+        </p>
+        <h1 className="font-serif font-black text-5xl tracking-tight">
+          Learn with Euler
+        </h1>
+        <p className="text-[var(--color-muted)] mt-2 text-lg">
+          Select a topic, start a conversation, and let Euler guide you step by step.
+        </p>
+      </div>
+
+      {/* 3-column layout: Topics | Chat | Conversations */}
+      <div className="grid grid-cols-1 xl:grid-cols-[280px_1fr_260px] gap-6 items-start">
+
+        {/* Topics sidebar */}
+        <TopicSidebar
+          selectedTopic={selectedTopic}
+          selectedLevel={selectedLevel}
+          onTopicSelect={handleTopicSelect}
+          onLevelChange={(level) => {
+            setSelectedLevel(level)
+            setSelectedTopic(null)
+          }}
+        />
+
+        {/* Chat window */}
+        <ChatWindow
+          key={currentConversation?.id}
+          topic={selectedTopic}
+          level={selectedLevel}
+          conversation={currentConversation}
+          onConversationUpdate={handleConversationUpdate}
+        />
+
+        {/* Conversation history */}
+        {user && (
+          <ConversationSidebar
+            key={convRefreshKey}
+            currentConversationId={currentConversation?.id}
+            onSelectConversation={(conv) => {
+              setCurrentConversation(conv)
+              if (conv.topic) setSelectedTopic(conv.topic)
+            }}
+            onNewConversation={handleNewConversation}
+            topic={selectedTopic}
+            level={selectedLevel}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
